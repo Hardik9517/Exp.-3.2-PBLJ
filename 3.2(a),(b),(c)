@@ -1,0 +1,271 @@
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * SpringHibernateSim.java
+ *
+ * Single-file, self-contained simulation that demonstrates:
+ * - Java-based dependency injection (AppConfig providing beans)
+ * - CRUD operations on Student (simulated Hibernate/ORM using in-memory store)
+ * - Transaction management semantics (begin/commit/rollback simulation)
+ *
+ * This is intended to *run on byteXL* (no external dependencies).
+ *
+ * The code mirrors real patterns: DAO, Service, TransactionManager, Config.
+ */
+public class SpringHibernateSim {
+
+    // ----------------------------
+    // Domain / Entity
+    // ----------------------------
+    public static class Student {
+        private Integer id;
+        private String name;
+        private Double marks;
+
+        public Student() {}
+        public Student(Integer id, String name, Double marks) {
+            this.id = id; this.name = name; this.marks = marks;
+        }
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+        public Double getMarks() { return marks; }
+        public void setMarks(Double marks) { this.marks = marks; }
+
+        @Override
+        public String toString() {
+            return "Student{id=" + id + ", name='" + name + "', marks=" + marks + "}";
+        }
+    }
+
+    // ----------------------------
+    // Transaction Manager (simulated)
+    // ----------------------------
+    public static class TransactionManager {
+        // For simulation, transaction keeps a snapshot of DAO store and can restore on rollback
+        private boolean active = false;
+        private Map<Integer, Student> snapshot;
+
+        public void beginInMemoryTransaction(Map<Integer, Student> datastore) {
+            if (active) throw new IllegalStateException("Transaction already active");
+            snapshot = deepCopy(datastore);
+            active = true;
+            System.out.println("[Tx] BEGIN");
+        }
+
+        public void commit() {
+            if (!active) throw new IllegalStateException("No active transaction");
+            snapshot = null;
+            active = false;
+            System.out.println("[Tx] COMMIT");
+        }
+
+        public void rollback(Map<Integer, Student> datastore) {
+            if (!active) throw new IllegalStateException("No active transaction");
+            // restore snapshot
+            datastore.clear();
+            datastore.putAll(deepCopy(snapshot));
+            snapshot = null;
+            active = false;
+            System.out.println("[Tx] ROLLBACK -> datastore restored to snapshot");
+        }
+
+        private Map<Integer, Student> deepCopy(Map<Integer, Student> src) {
+            Map<Integer, Student> copy = new HashMap<>();
+            for (Map.Entry<Integer, Student> e : src.entrySet()) {
+                Student s = e.getValue();
+                copy.put(e.getKey(), new Student(s.getId(), s.getName(), s.getMarks()));
+            }
+            return copy;
+        }
+    }
+
+    // ----------------------------
+    // DAO (simulating Hibernate Session-based CRUD)
+    // ----------------------------
+    public static class StudentDAO {
+        // In-memory datastore simulating persisted table
+        private final Map<Integer, Student> datastore = new HashMap<>();
+        private final AtomicInteger idGenerator = new AtomicInteger(1000);
+
+        // Expose datastore for TransactionManager to snapshot/restore
+        public Map<Integer, Student> getDatastore() { return datastore; }
+
+        // CRUD operations
+        public Student save(Student s) {
+            if (s.getId() == null) {
+                s.setId(idGenerator.incrementAndGet());
+            }
+            datastore.put(s.getId(), new Student(s.getId(), s.getName(), s.getMarks()));
+            return s;
+        }
+
+        public Student findById(Integer id) {
+            Student s = datastore.get(id);
+            return (s == null) ? null : new Student(s.getId(), s.getName(), s.getMarks());
+        }
+
+        public List<Student> findAll() {
+            List<Student> list = new ArrayList<>();
+            for (Student s : datastore.values()) list.add(new Student(s.getId(), s.getName(), s.getMarks()));
+            return list;
+        }
+
+        public void update(Student s) {
+            if (s.getId() == null || !datastore.containsKey(s.getId())) {
+                throw new RuntimeException("Student does not exist with id=" + s.getId());
+            }
+            datastore.put(s.getId(), new Student(s.getId(), s.getName(), s.getMarks()));
+        }
+
+        public void delete(Integer id) {
+            datastore.remove(id);
+        }
+    }
+
+    // ----------------------------
+    // Service layer - uses DAO and TransactionManager (simulating @Transactional)
+    // ----------------------------
+    public static class StudentService {
+        private final StudentDAO dao;
+        private final TransactionManager txManager;
+
+        public StudentService(StudentDAO dao, TransactionManager txManager) {
+            this.dao = dao; this.txManager = txManager;
+        }
+
+        // Simulated transactional create
+        public Student createStudentTransactional(String name, Double marks) {
+            txManager.beginInMemoryTransaction(dao.getDatastore());
+            try {
+                Student s = new Student(null, name, marks);
+                Student saved = dao.save(s);
+                // simulate other operations that could fail
+                if (marks < 0) throw new RuntimeException("Marks cannot be negative");
+                txManager.commit();
+                System.out.println("[Service] Student created: " + saved);
+                return saved;
+            } catch (RuntimeException ex) {
+                txManager.rollback(dao.getDatastore());
+                System.out.println("[Service] Exception during create: " + ex.getMessage());
+                throw ex;
+            }
+        }
+
+        // Simulated transactional update
+        public void updateMarksTransactional(Integer id, Double newMarks) {
+            txManager.beginInMemoryTransaction(dao.getDatastore());
+            try {
+                Student s = dao.findById(id);
+                if (s == null) throw new RuntimeException("Student not found: " + id);
+                s.setMarks(newMarks);
+                dao.update(s);
+                // simulate validation error
+                if (newMarks < 0) throw new RuntimeException("Marks cannot be negative");
+                txManager.commit();
+                System.out.println("[Service] Updated marks for id=" + id);
+            } catch (RuntimeException ex) {
+                txManager.rollback(dao.getDatastore());
+                System.out.println("[Service] Exception during update: " + ex.getMessage());
+                throw ex;
+            }
+        }
+
+        public List<Student> listAll() {
+            return dao.findAll();
+        }
+
+        public void deleteStudent(Integer id) {
+            // delete non-transactional for demo
+            dao.delete(id);
+            System.out.println("[Service] Deleted student id=" + id);
+        }
+
+        public Student find(Integer id) { return dao.findById(id); }
+    }
+
+    // ----------------------------
+    // Java-based Configuration (simulating Spring @Configuration)
+    // ----------------------------
+    public static class AppConfig {
+        // create and wire beans manually
+        public TransactionManager transactionManager() {
+            return new TransactionManager();
+        }
+        public StudentDAO studentDAO() {
+            return new StudentDAO();
+        }
+        public StudentService studentService() {
+            return new StudentService(studentDAO(), transactionManager());
+        }
+    }
+
+    // ----------------------------
+    // Simple CLI to interact and test features
+    // ----------------------------
+    public static void main(String[] args) {
+        System.out.println("== Spring+Hibernate Simulation (byteXL-friendly) ==");
+        AppConfig cfg = new AppConfig();
+        StudentService service = cfg.studentService();
+        StudentDAO dao = cfg.studentDAO();
+
+        // Pre-populate - simulate existing persistent data (as if DB had rows)
+        dao.save(new Student(null, "Alice", 85.0));
+        dao.save(new Student(null, "Bob", 72.5));
+
+        Scanner in = new Scanner(System.in);
+        while (true) {
+            System.out.println("\nMenu:");
+            System.out.println("1) List all students");
+            System.out.println("2) Create student (transactional)");
+            System.out.println("3) Update marks (transactional)");
+            System.out.println("4) Delete student");
+            System.out.println("5) Find student by id");
+            System.out.println("6) Demonstrate failed transaction (will rollback)");
+            System.out.println("0) Exit");
+            System.out.print("Choose: ");
+            int c = -1;
+            try { c = Integer.parseInt(in.nextLine().trim()); } catch (Exception e) { c = -1; }
+            try {
+                if (c == 0) { System.out.println("Bye"); break; }
+                else if (c == 1) {
+                    List<Student> list = service.listAll();
+                    if (list.isEmpty()) System.out.println("(no students)");
+                    else list.forEach(System.out::println);
+                } else if (c == 2) {
+                    System.out.print("Name: "); String name = in.nextLine();
+                    System.out.print("Marks: "); Double marks = Double.parseDouble(in.nextLine());
+                    service.createStudentTransactional(name, marks);
+                } else if (c == 3) {
+                    System.out.print("ID: "); Integer id = Integer.parseInt(in.nextLine());
+                    System.out.print("New Marks: "); Double nm = Double.parseDouble(in.nextLine());
+                    service.updateMarksTransactional(id, nm);
+                } else if (c == 4) {
+                    System.out.print("ID to delete: "); Integer id = Integer.parseInt(in.nextLine());
+                    service.deleteStudent(id);
+                } else if (c == 5) {
+                    System.out.print("ID to find: "); Integer id = Integer.parseInt(in.nextLine());
+                    Student s = service.find(id);
+                    System.out.println(s == null ? "Not found" : s);
+                } else if (c == 6) {
+                    // Transaction that will fail -> rollback
+                    System.out.println("Creating student with negative marks to force rollback...");
+                    try {
+                        service.createStudentTransactional("EvilStudent", -10.0);
+                    } catch (Exception e) {
+                        System.out.println("Expected failure: " + e.getMessage());
+                    }
+                    System.out.println("State after rollback:");
+                    service.listAll().forEach(System.out::println);
+                } else {
+                    System.out.println("Invalid choice");
+                }
+            } catch (RuntimeException re) {
+                System.out.println("Operation failed: " + re.getMessage());
+            }
+        }
+        in.close();
+    }
+}
